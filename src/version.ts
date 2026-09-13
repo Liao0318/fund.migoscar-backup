@@ -3,7 +3,7 @@
  * 集中管理版本號、建置時間、環境識別與更新日誌
  */
 
-export const APP_VERSION = 'v2.7.6';
+export const APP_VERSION = 'v2.7.7';
 export const APP_BUILD_DATE = '2026.09.13';
 export const APP_NAME = '伴伴記';
 export const APP_FULL_NAME = '伴伴記 • BanBan Accounting';
@@ -16,6 +16,17 @@ export interface AppReleaseNote {
 }
 
 export const APP_RELEASE_NOTES: AppReleaseNote[] = [
+  {
+    version: 'v2.7.7',
+    date: '2026.09.13',
+    title: '試算表欄位錯位與代墊人/品項名稱混淆全自動校正修復',
+    highlights: [
+      '徹底解決登入帳號後「代墊人顯示為品項名稱（如：晚餐、大全聯），且金額不正確或顯示為 $0」的問題',
+      '升級後端與前端表頭比對演算法：精準識別 Google 試算表歷史版本「首欄遺漏 ID 標籤導致資料列全體欄位左移一格」的結構性位移',
+      '強化真實資料還原引擎（sanitizeAndHealRecord）：自動將錯置於 payer 欄位的項目名稱還原為 item，將錯置於 type 欄位的數字金額還原為 amount，並精準恢復出資人姓名（廖尹丞/周沛緹）與收支類型',
+      '開機與渲染即時自癒防護：若本機快取或記憶體中曾載入過損壞資料，開機時立即自動修復並固化，確保統計數字、公積金代墊比例與明細即刻恢復 100% 正確'
+    ]
+  },
   {
     version: 'v2.7.6',
     date: '2026.09.13',

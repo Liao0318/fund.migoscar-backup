@@ -252,26 +252,32 @@ function setupDatabase() {
     }
   });
 
-  // 檢查既有流水帳資料庫是否需要升級 ID 欄位 (若首欄仍為「月份」則自動插入 ID 欄位)
+  // 檢查既有流水帳資料庫是否需要升級 ID 欄位 (若首欄仍為「月份」則自動校正或插入 ID 欄位)
   try {
     var flowSheet = ss.getSheetByName("流水帳資料庫");
     if (flowSheet && flowSheet.getLastRow() >= 1) {
       var firstHeader = String(flowSheet.getRange(1, 1).getValue() || "").trim();
       if (firstHeader === "月份") {
-        flowSheet.insertColumnBefore(1);
-        flowSheet.getRange(1, 1).setValue("ID")
-          .setBackground("#F4F1EA")
-          .setFontColor("#3E3A36")
-          .setFontWeight("bold")
-          .setHorizontalAlignment("center");
-        
-        var totalRows = flowSheet.getLastRow();
-        if (totalRows > 1) {
-          var idColValues = [];
-          for (var r = 2; r <= totalRows; r++) {
-            idColValues.push(["rec_" + new Date().getTime() + "_" + Math.floor(Math.random() * 10000) + "_" + r]);
+        var firstDataCell = flowSheet.getLastRow() >= 2 ? String(flowSheet.getRange(2, 1).getValue() || "").trim() : "";
+        if (firstDataCell.indexOf("rec_") === 0) {
+          // 資料列本身第 1 欄就已經是 ID！僅是表頭漏了 ID 欄標籤，直接更正表頭為 8 欄標準標籤
+          flowSheet.getRange(1, 1, 1, 8).setValues([["ID", "月份", "日期", "項目", "出錢人", "出錢金額", "類型", "時間戳記"]]);
+        } else {
+          flowSheet.insertColumnBefore(1);
+          flowSheet.getRange(1, 1).setValue("ID")
+            .setBackground("#F4F1EA")
+            .setFontColor("#3E3A36")
+            .setFontWeight("bold")
+            .setHorizontalAlignment("center");
+          
+          var totalRows = flowSheet.getLastRow();
+          if (totalRows > 1) {
+            var idColValues = [];
+            for (var r = 2; r <= totalRows; r++) {
+              idColValues.push(["rec_" + new Date().getTime() + "_" + Math.floor(Math.random() * 10000) + "_" + r]);
+            }
+            flowSheet.getRange(2, 1, totalRows - 1, 1).setValues(idColValues);
           }
-          flowSheet.getRange(2, 1, totalRows - 1, 1).setValues(idColValues);
         }
       }
     }
@@ -354,15 +360,26 @@ function getDashboardData() {
       else if (colMap.timestamp === -1 && (h.indexOf("時間") !== -1 || h.indexOf("戳記") !== -1 || h.indexOf("建立") !== -1 || h.indexOf("time") !== -1)) colMap.timestamp = c;
     }
 
-    // 2. 若欄位對應不完整，藉由資料特徵自主校正
+    // 2. 表頭與資料特徵全方位比對（自動探測是否首欄遺漏 ID 標籤造成欄位全體左移）
     var firstRow = values[0] || [];
     var firstCellStr = String(firstRow[0] || "").trim();
     var firstCellIsId = firstCellStr.indexOf("rec_") === 0 || firstCellStr.length > 15;
     var firstHeaderStr = String(headerRow[0] || "").trim().toUpperCase();
 
-    var hasIdCol = (firstCellIsId || colMap.id === 0 || firstHeaderStr === "ID" || firstHeaderStr.indexOf("編號") !== -1 || firstHeaderStr.indexOf("序號") !== -1);
-
-    if (colMap.amount === -1 || colMap.item === -1) {
+    // 關鍵特徵：如果資料第 0 欄是 rec_ 開頭的 ID，但表頭第 0 欄不是 ID（例如是「月份」）
+    // 這代表使用者的試算表表頭只有 7 欄無 ID，但下方資料列全部是 8 欄包含 ID！
+    // 造成所有表頭對應被左移了 1 格，必須強制修正映射為 8 欄標準格局
+    if (firstCellIsId && colMap.id !== 0) {
+      colMap.id = 0;
+      colMap.month = 1;
+      colMap.date = 2;
+      colMap.item = 3;
+      colMap.payer = 4;
+      colMap.amount = 5;
+      colMap.type = 6;
+      colMap.timestamp = 7;
+    } else if (colMap.amount === -1 || colMap.item === -1) {
+      var hasIdCol = (firstCellIsId || colMap.id === 0 || firstHeaderStr === "ID" || firstHeaderStr.indexOf("編號") !== -1 || firstHeaderStr.indexOf("序號") !== -1);
       if (hasIdCol) {
         colMap.id = 0;
         colMap.month = 1;
@@ -390,23 +407,65 @@ function getDashboardData() {
 
     for (var i = values.length - 1; i >= 0; i--) {
       var row = values[i];
-      var idVal = colMap.id !== -1 ? String(row[colMap.id] || ("rec_" + (i + 2))) : ("rec_" + (i + 2));
-      var monthVal = colMap.month !== -1 ? row[colMap.month] : "";
-      var dateVal = colMap.date !== -1 ? row[colMap.date] : "";
-      var item = colMap.item !== -1 ? String(row[colMap.item] || "") : "";
-      var payer = colMap.payer !== -1 ? String(row[colMap.payer] || "") : "";
-      var amount = colMap.amount !== -1 ? (parseFloat(row[colMap.amount]) || 0) : 0;
-      var type = colMap.type !== -1 ? String(row[colMap.type] || "") : "";
-      var timestampVal = colMap.timestamp !== -1 ? row[colMap.timestamp] : "";
+      var rowCell0 = String(row[0] || "").trim();
+      var isThisRow8ColWithId = rowCell0.indexOf("rec_") === 0;
 
-      // 防禦性資料修正：若發生錯位
+      var idVal = "";
+      var monthVal = "";
+      var dateVal = "";
+      var item = "";
+      var payer = "";
+      var amount = 0;
+      var type = "";
+      var timestampVal = "";
+
+      if (isThisRow8ColWithId) {
+        // 資料列首欄即為 rec_ ID，直接按 8 欄標準順序取值，徹底免疫表頭錯位
+        idVal = rowCell0;
+        monthVal = row[1];
+        dateVal = row[2];
+        item = String(row[3] || "");
+        payer = String(row[4] || "");
+        amount = parseFloat(row[5]) || 0;
+        type = String(row[6] || "");
+        timestampVal = row[7];
+      } else {
+        idVal = colMap.id !== -1 ? String(row[colMap.id] || ("rec_" + (i + 2))) : ("rec_" + (i + 2));
+        monthVal = colMap.month !== -1 ? row[colMap.month] : "";
+        dateVal = colMap.date !== -1 ? row[colMap.date] : "";
+        item = colMap.item !== -1 ? String(row[colMap.item] || "") : "";
+        payer = colMap.payer !== -1 ? String(row[colMap.payer] || "") : "";
+        amount = colMap.amount !== -1 ? (parseFloat(row[colMap.amount]) || 0) : 0;
+        type = colMap.type !== -1 ? String(row[colMap.type] || "") : "";
+        timestampVal = colMap.timestamp !== -1 ? row[colMap.timestamp] : "";
+      }
+
+      // 防禦性資料修正：若個別列因歷史原因仍殘留位移
       if (String(monthVal).indexOf("rec_") === 0) {
         idVal = String(monthVal);
         monthVal = "";
       }
-      if (item instanceof Date || String(item).indexOf("GMT") !== -1) {
+      var isDateLikeItem = item instanceof Date || String(item).indexOf("GMT") !== -1 || /^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(String(item).trim());
+      if (isDateLikeItem) {
         dateVal = item;
-        item = payer && payer !== DEFAULT_USER_A_NAME && payer !== DEFAULT_USER_B_NAME ? payer : "日常生活支出";
+        // 發生推移時：原項目名稱被推入 payer 欄位（例如「晚餐」或「大全聯」）
+        var realItem = (payer && payer !== DEFAULT_USER_A_NAME && payer !== DEFAULT_USER_B_NAME && payer !== "共同帳戶") ? payer : "日常生活支出";
+        // 金額被推入 type 欄位
+        var realAmount = parseFloat(String(type).replace(/[^0-9.]/g, '')) || amount || 0;
+        // 代墊人還原：不能等於項目名稱
+        var realPayer = DEFAULT_USER_A_NAME;
+        if (String(amount).indexOf("周") !== -1 || String(type).indexOf("周") !== -1 || String(timestampVal).indexOf("周") !== -1) {
+          realPayer = DEFAULT_USER_B_NAME;
+        } else if (String(type).indexOf("收入") !== -1 || String(realItem).indexOf("公積金") !== -1) {
+          realPayer = "共同帳戶";
+        }
+        item = realItem;
+        amount = realAmount;
+        payer = realPayer;
+        type = String(timestampVal).indexOf("收入") !== -1 || String(realItem).indexOf("公積金") !== -1 ? "收入-固定公積金" : "支出-日常代墊";
+      } else if (payer && item && payer === item && payer !== DEFAULT_USER_A_NAME && payer !== DEFAULT_USER_B_NAME && payer !== "共同帳戶") {
+        // 若 payer 與 item 相同（例如都是「晚餐」），payer 必須恢復為真實出資人人名
+        payer = DEFAULT_USER_A_NAME;
       }
 
       var month = monthVal instanceof Date ? Utilities.formatDate(monthVal, "GMT+8", "yyyy-MM") : String(monthVal || "").substring(0, 7);

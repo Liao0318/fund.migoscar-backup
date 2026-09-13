@@ -285,6 +285,19 @@ const isMonthReconciled = (month: string, list: string[]): boolean => {
   return list.some(item => normalizeMonth(item) === normMonth);
 };
 
+// 已知代墊人/出資人姓名關鍵字判定清單
+export const KNOWN_PAYER_KEYWORDS = [
+  '廖', '周', '廖尹丞', '周沛緹', '小廖', '小周', 
+  '共同帳戶', '共同', '待確認伴侶', '待確認', '待', '伴侶'
+];
+
+export const isPayerNameRecognized = (p?: string): boolean => {
+  if (!p || typeof p !== 'string') return false;
+  const s = p.trim();
+  if (!s) return false;
+  return KNOWN_PAYER_KEYWORDS.some(k => s === k || s.includes(k));
+};
+
 // 🛡️ 智慧對帳紀錄修復防護網：自動校正 Google 試算表可能因欄位推移或表頭版本不一致造成的資料錯位
 export const sanitizeAndHealRecord = (r: any): RecordItem => {
   if (!r || typeof r !== 'object') return r;
@@ -343,21 +356,29 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
     normalizedDate = `${normalizedMonth}-01`;
   }
 
-  // 2. 欄位錯位真實偵測（僅在欄位發生跨欄推移時觸發）
+  // 2. 欄位錯位真實偵測（支援因首欄未設 ID 造成之後移 1 欄或更深之位移）
   // 特徵 A：month 存放的是真實 ID（以 'rec_' 開頭）
   const monthLooksLikeId = typeof rec.month === 'string' && rec.month.trim().startsWith('rec_');
-  // 特徵 B：item 存放的是完整日期時間物件字串且原 date 欄位並非日期
+  // 特徵 B：item 存放的是完整日期時間物件字串或標準日期字串
   const itemLooksLikeDate = typeof rec.item === 'string' && (
     rec.item.includes('GMT') || 
     rec.item.includes('台北標準時間') || 
-    /^[A-Z][a-z]{2}\s[A-Z][a-z]{2}\s\d{1,2}\s\d{4}/.test(rec.item)
+    /^[A-Z][a-z]{2}\s[A-Z][a-z]{2}\s\d{1,2}\s\d{4}/.test(rec.item) ||
+    /^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(rec.item.trim())
   );
+  // 特徵 C：date 存放的只有 YYYY-MM（而非 YYYY-MM-DD）且 item 是日期格式
+  const dateLooksLikeMonth = typeof rec.date === 'string' && /^\d{4}[-/]\d{1,2}$/.test(rec.date.trim());
+  // 特徵 D：payer 與 item 完全相同（例如「晚餐」===「晚餐」或「大全聯」===「大全聯」），且非合法出資人人名
+  const payerSameAsItem = typeof rec.payer === 'string' && typeof rec.item === 'string' && 
+    rec.payer.trim().length > 0 && rec.payer.trim() === rec.item.trim() && !isPayerNameRecognized(rec.payer);
 
-  if (monthLooksLikeId || itemLooksLikeDate) {
+  const isShifted = monthLooksLikeId || itemLooksLikeDate || dateLooksLikeMonth || payerSameAsItem;
+
+  if (isShifted) {
     // 發生欄位位移錯位！進行精準欄位解包還原：
     const trueId = (monthLooksLikeId ? rec.month : rec.id) || `rec_${Date.now()}`;
 
-    // 還原日期
+    // 還原日期與月份
     let trueDate = normalizedDate;
     if (itemLooksLikeDate) {
       try {
@@ -365,54 +386,93 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
         if (!isNaN(d.getTime())) {
           const pad = (n: number) => String(n).padStart(2, '0');
           trueDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        } else {
+          const m = String(rec.item).match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+          if (m) {
+            trueDate = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+          }
         }
       } catch (e) {}
     }
-    const trueMonth = trueDate.substring(0, 7);
+    const trueMonth = trueDate ? trueDate.substring(0, 7) : normalizedMonth;
 
-    // 還原項目描述
-    const trueItem = (rec.payer && !['廖', '周', '廖尹丞', '周沛緹', '小廖', '小周', '共同帳戶', '共同', '待確認伴侶', '待確認', '待'].includes(rec.payer))
-      ? rec.payer
-      : (itemLooksLikeDate ? '日常生活支出' : (rec.item || '日常生活支出'));
+    // 還原項目描述 (trueItem)：
+    // 在推移列中，原項目名稱通常被推至 payer 欄位（例如「晚餐」、「大全聯」）
+    let trueItem = '';
+    const rawPayer = String(rec.payer || '').trim();
+    const rawItem = String(rec.item || '').trim();
 
-    // 還原金額
-    let trueAmount = 0;
-    const typeClean = String(rec.type || '').trim();
-    const typeNum = parseFloat(typeClean.replace(/[^0-9.]/g, ''));
-    if (!isNaN(typeNum) && typeNum > 0 && !typeClean.includes('撥入') && !typeClean.includes('支出') && !typeClean.includes('公積金') && !typeClean.includes('收入')) {
-      trueAmount = typeNum;
+    if (rawPayer && !isPayerNameRecognized(rawPayer)) {
+      trueItem = rawPayer;
+    } else if (rawItem && !itemLooksLikeDate) {
+      trueItem = rawItem;
     } else {
-      const amtNum = parseFloat(String(rec.amount || '').replace(/[^0-9.]/g, ''));
-      if (!isNaN(amtNum) && amtNum > 0) {
-        trueAmount = amtNum;
-      }
+      trueItem = '日常生活支出';
     }
 
-    // 還原類型：嚴格判別收入與公積金注資
+    // 還原金額 (trueAmount)：
+    // 在推移列中，原金額通常被推移至 type 欄位（例如 470、462、20000），
+    // 而原 payer 欄位（例如「廖尹丞」）可能被推至 amount 欄位或被 GAS parseFloat 轉成 0
+    let trueAmount = 0;
+    const typeStr = String(rec.type || '').trim();
+    const typeNum = parseFloat(typeStr.replace(/[^0-9.]/g, ''));
+    const amtNum = parseFloat(String(rec.amount || '').replace(/[^0-9.]/g, ''));
+    const origNum = parseFloat(String(rec.originalAmount || '').replace(/[^0-9.]/g, ''));
+
+    // 若 type 欄位含有數字且非純文字標籤（例如不是「支出-日常代墊」），優先作為金額
+    if (!isNaN(typeNum) && typeNum > 0 && !typeStr.includes('支出') && !typeStr.includes('代墊') && !typeStr.includes('收入')) {
+      trueAmount = typeNum;
+    } else if (!isNaN(amtNum) && amtNum > 0) {
+      trueAmount = amtNum;
+    } else if (!isNaN(typeNum) && typeNum > 0) {
+      trueAmount = typeNum;
+    } else if (!isNaN(origNum) && origNum > 0) {
+      trueAmount = origNum;
+    }
+
+    // 還原收支類型 (trueType)：
     let trueType: '支出-日常代墊' | '收入-固定公積金' = '支出-日常代墊';
-    const allText = `${rec.type || ''} ${rec.item || ''} ${rec.timestamp || ''} ${rec.payer || ''}`;
+    const allContext = `${rec.type || ''} ${rec.timestamp || ''} ${trueItem} ${rec.item || ''} ${rec.payer || ''}`;
     if (
-      allText.includes('收入') || 
-      allText.includes('公積金') || 
-      allText.includes('撥入') || 
-      allText.includes('注資') || 
-      allText.includes('底池')
+      allContext.includes('收入') || 
+      allContext.includes('公積金') || 
+      allContext.includes('撥入') || 
+      allContext.includes('注資') || 
+      allContext.includes('底池')
     ) {
       trueType = '收入-固定公積金';
     } else {
       trueType = '支出-日常代墊';
     }
 
-    // 還原付款人
-    let truePayer = String(rec.payer || '').trim();
+    // 🎯 還原代墊人/付款人 (truePayer) —— 徹底解決代墊人變跟項目名稱一樣的問題！
+    let truePayer = '';
     if (trueType === '收入-固定公積金') {
       truePayer = '共同帳戶';
-    } else if (!truePayer || truePayer === 'undefined' || truePayer === 'null') {
-      const allContext = `${rec.amount || ''} ${rec.type || ''} ${rec.timestamp || ''}`;
-      if (allContext.includes('周沛緹') || allContext.includes('沛緹') || allContext.includes('周') || allContext.includes('待')) {
-        truePayer = '周沛緹';
+    } else {
+      // 支出項目：代墊人必須是真實人名，絕對不能等於項目名稱（例如絕對不能是「晚餐」或「大全聯」）
+      if (rawPayer && rawPayer !== trueItem && isPayerNameRecognized(rawPayer)) {
+        // rawPayer 本身就是合法出資人人名
+        if (rawPayer.includes('周') || rawPayer.includes('沛緹') || rawPayer.includes('待')) {
+          truePayer = '周沛緹';
+        } else if (rawPayer.includes('共同')) {
+          truePayer = '共同帳戶';
+        } else {
+          truePayer = '廖尹丞';
+        }
       } else {
-        truePayer = '廖尹丞';
+        // rawPayer 是品項名稱或被污染，必須自上下文或帳本規則還原出資人
+        const ctx = `${rec.amount || ''} ${rec.type || ''} ${rec.timestamp || ''} ${rec.note || ''} ${rec.rawPayer || ''}`;
+        if (ctx.includes('周沛緹') || ctx.includes('沛緹') || ctx.includes('周') || ctx.includes('待')) {
+          truePayer = '周沛緹';
+        } else if (ctx.includes('廖尹丞') || ctx.includes('尹丞') || ctx.includes('廖')) {
+          truePayer = '廖尹丞';
+        } else if (ctx.includes('共同')) {
+          truePayer = '共同帳戶';
+        } else {
+          // 預設為主要日常代墊人廖尹丞
+          truePayer = '廖尹丞';
+        }
       }
     }
 
@@ -425,17 +485,31 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
       payer: truePayer,
       amount: trueAmount,
       type: trueType,
-      timestamp: `${trueDate} 12:00:00`
+      timestamp: rec.timestamp && !rec.timestamp.includes('支出') && !rec.timestamp.includes('收入') ? rec.timestamp : `${trueDate} 12:00:00`
     };
   } else {
     // 無錯位正常情況：進行欄位內容標準化與防禦性校正
     rec.month = normalizedMonth;
     rec.date = normalizedDate;
-    rec.amount = Number(rec.amount) || 0;
+
+    // 校正金額
+    const numAmt = parseFloat(String(rec.amount || '').replace(/[^0-9.]/g, ''));
+    if (!isNaN(numAmt) && numAmt > 0) {
+      rec.amount = numAmt;
+    } else {
+      const typeNum = parseFloat(String(rec.type || '').replace(/[^0-9.]/g, ''));
+      if (!isNaN(typeNum) && typeNum > 0 && !String(rec.type).includes('支出') && !String(rec.type).includes('收入')) {
+        rec.amount = typeNum;
+      } else {
+        rec.amount = Number(rec.amount) || 0;
+      }
+    }
 
     // 校正類型與付款人
     const rawType = String(rec.type || '').trim();
     const rawItem = String(rec.item || '').trim();
+    const rawPayer = String(rec.payer || '').trim();
+
     if (
       rawType === '收入-固定公積金' || 
       rawType.includes('收入') || 
@@ -448,16 +522,28 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
       rawItem.includes('底池')
     ) {
       rec.type = '收入-固定公積金';
-      if (!rec.payer || rec.payer === '共同' || rec.payer === '共同基金') {
-        rec.payer = '共同帳戶';
-      }
+      rec.payer = '共同帳戶';
     } else {
       rec.type = '支出-日常代墊';
-    }
 
-    // 確保 payer 正常
-    if (!rec.payer) {
-      rec.payer = rec.type === '收入-固定公積金' ? '共同帳戶' : '廖尹丞';
+      // 關鍵防禦：若 rec.payer 等於 rec.item（例如「晚餐」或「大全聯」）或非合法出資人人名，強制矯正
+      if (!rawPayer || rawPayer === rawItem || !isPayerNameRecognized(rawPayer)) {
+        const ctx = `${rawItem} ${rec.timestamp || ''} ${rec.amount || ''} ${rec.note || ''}`;
+        if (ctx.includes('周') || ctx.includes('沛緹') || ctx.includes('待')) {
+          rec.payer = '周沛緹';
+        } else {
+          rec.payer = '廖尹丞';
+        }
+      } else {
+        // 標準化人名格式
+        if (rawPayer.includes('周') || rawPayer.includes('沛緹') || rawPayer.includes('待')) {
+          rec.payer = '周沛緹';
+        } else if (rawPayer.includes('共同')) {
+          rec.payer = '共同帳戶';
+        } else {
+          rec.payer = '廖尹丞';
+        }
+      }
     }
   }
 
@@ -576,6 +662,30 @@ export default function App() {
     window.addEventListener('hashchange', handleHash);
     return () => window.removeEventListener('hashchange', handleHash);
   }, []);
+
+  // 🛡️ 即時資料防禦自癒：若記憶體中的 records 含有錯位資料（如代墊人等於品項名稱、欄位移位），立即自動修復
+  useEffect(() => {
+    if (records && records.length > 0) {
+      const needsHeal = records.some(r => 
+        (r.payer && r.item && r.payer === r.item && !isPayerNameRecognized(r.payer)) ||
+        !isPayerNameRecognized(r.payer) ||
+        (r.month && String(r.month).startsWith('rec_')) ||
+        (typeof r.item === 'string' && (r.item.includes('GMT') || /^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(r.item.trim())))
+      );
+      if (needsHeal) {
+        const healed = sanitizeAndHealRecords(records);
+        setRecords(healed);
+        try {
+          const auth = localStorage.getItem('banban_auth_user');
+          const cleanEmail = auth ? (JSON.parse(auth).email || '').trim().toLowerCase() : '';
+          localStorage.setItem('muji_ledger_data', JSON.stringify(healed));
+          if (cleanEmail) {
+            localStorage.setItem(`muji_ledger_data_${cleanEmail}`, JSON.stringify(healed));
+          }
+        } catch (e) {}
+      }
+    }
+  }, [records]);
 
   // ------------------- 代墊借還 (Split Debt) 狀態與函式 -------------------
   const [splitItems, setSplitItems] = useState<SplitRecordItem[]>(() => {
@@ -1353,11 +1463,12 @@ export default function App() {
         // 1. 掛接帳本紀錄（優先以伺服器資料庫，若伺服器尚無但本機有，平滑採用本機）
         if (hasCloudLedger && serverLedgerData) {
           if (Array.isArray(serverLedgerData.records) && serverLedgerData.records.length > 0) {
-            setRecords(serverLedgerData.records);
+            const healed = sanitizeAndHealRecords(serverLedgerData.records);
+            setRecords(healed);
             try { 
-              localStorage.setItem('muji_ledger_data', JSON.stringify(serverLedgerData.records)); 
+              localStorage.setItem('muji_ledger_data', JSON.stringify(healed)); 
               if (cleanEmail) {
-                localStorage.setItem(`muji_ledger_data_${cleanEmail}`, JSON.stringify(serverLedgerData.records));
+                localStorage.setItem(`muji_ledger_data_${cleanEmail}`, JSON.stringify(healed));
               }
               localStorage.setItem('banban_sync_version', APP_VERSION);
               if (cleanEmail) {
@@ -1392,7 +1503,7 @@ export default function App() {
             try { localStorage.setItem('banban_split_summary', JSON.stringify(serverLedgerData.splitSummary)); } catch (e) {}
           }
         } else if (hasLocalBackupData) {
-          if (localRecordsBackup.length > 0) setRecords(localRecordsBackup);
+          if (localRecordsBackup.length > 0) setRecords(sanitizeAndHealRecords(localRecordsBackup));
           if (localSplitBackup.length > 0) setSplitItems(localSplitBackup);
           if (localShoppingBackup.length > 0) setShoppingItems(localShoppingBackup);
         }
