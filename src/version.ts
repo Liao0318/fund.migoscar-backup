@@ -3,8 +3,8 @@
  * 集中管理版本號、建置時間、環境識別與更新日誌
  */
 
-export const APP_VERSION = 'v2.7.2';
-export const APP_BUILD_DATE = '2026.09.12';
+export const APP_VERSION = 'v2.7.3';
+export const APP_BUILD_DATE = '2026.09.13';
 export const APP_NAME = '伴伴記';
 export const APP_FULL_NAME = '伴伴記 • BanBan Accounting';
 
@@ -16,6 +16,17 @@ export interface AppReleaseNote {
 }
 
 export const APP_RELEASE_NOTES: AppReleaseNote[] = [
+  {
+    version: 'v2.7.3',
+    date: '2026.09.13',
+    title: 'Google 試算表資料庫即時雙向背景同步與焦點自動對齊',
+    highlights: [
+      '在 Google 試算表直接異動或增刪資料時，切換回 App 視窗或點擊畫面時立即於背景無感自動同步，免手動點擊更新',
+      '加入定時 12 秒高頻靜默背景輪詢，雙邊資料庫隨時保持 100% 即時一致，無任何彈窗通知干擾',
+      '修復資料庫清空或剩餘 0 筆時被舊機制阻擋更新的問題，確保試算表刪減行時 App 畫面同步歸零',
+      '升級跨裝置（平板與電腦）記帳數據對齊引擎，確保所有收支、公積金撥入與代墊分帳數值精準無誤'
+    ]
+  },
   {
     version: 'v2.7.2',
     date: '2026.09.12',

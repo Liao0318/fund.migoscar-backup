@@ -2349,7 +2349,7 @@ export default function App() {
             // 只有在資料內容有變動時才更新狀態，避免無謂 re-render
             const prevStr = JSON.stringify(prev);
             const nextStr = JSON.stringify(healed);
-            if (prevStr !== nextStr && healed.length > 0) {
+            if (prevStr !== nextStr) {
               localStorage.setItem('muji_ledger_data', nextStr);
               return healed;
             }
@@ -3422,33 +3422,54 @@ export default function App() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // 3. 當使用者切換回到此分頁 (前景) 時，按需自動同步最新資料（避免背景盲目輪詢浪費配額）
-    let lastVisibilitySync = Date.now();
-    const handleVisibilityChange = async () => {
+    // 3. 視窗焦點與即時背景同步（當使用者在 Google Sheets 修改後切換回本 App，或停留頁面時皆即時在背景同步，不發送干擾通知）
+    let lastVisibilitySync = 0;
+    const triggerSilentSync = async () => {
+      const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      if (!online) return;
+      try {
+        if (getPendingQueue().length > 0) {
+          await processSyncQueue();
+        }
+        await Promise.allSettled([
+          fetchDashboardData(false, true),
+          fetchShoppingData(true),
+          fetchSplitData(true),
+          fetchTravelData(true)
+        ]);
+      } catch (err) {
+        // 背景靜默同步，忽略異常
+      }
+    };
+
+    const handleVisibilityOrFocus = () => {
       if (!document.hidden) {
         const now = Date.now();
-        // 節流：回到前景時若距上次同步超過 30 秒才執行背景拉取
-        if (now - lastVisibilitySync > 30000) {
+        // 當使用者切回分頁或點擊視窗時，若距離上次背景同步大於 2 秒即刻觸發無感同步
+        if (now - lastVisibilitySync > 2000) {
           lastVisibilitySync = now;
-          const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
-          if (online) {
-            if (getPendingQueue().length > 0) {
-              await processSyncQueue();
-            }
-            fetchDashboardData(false, true);
-            fetchShoppingData(true);
-            fetchSplitData(true);
-            fetchTravelData(true);
-          }
+          triggerSilentSync();
         }
       }
     };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+
+    // 4. 定時即時靜默輪詢：每 12 秒在背景自動拉取 Google Sheets 最新資料庫資料，保持兩端資料始終完全一致（無通知干擾）
+    const realTimePollingTimer = setInterval(() => {
+      if (!document.hidden) {
+        lastVisibilitySync = Date.now();
+        triggerSilentSync();
+      }
+    }, 12000);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      clearInterval(realTimePollingTimer);
     };
   }, [gasWebUrl]);
 
