@@ -3,7 +3,7 @@
  * 集中管理版本號、建置時間、環境識別與更新日誌
  */
 
-export const APP_VERSION = 'v2.7.5';
+export const APP_VERSION = 'v2.7.6';
 export const APP_BUILD_DATE = '2026.09.13';
 export const APP_NAME = '伴伴記';
 export const APP_FULL_NAME = '伴伴記 • BanBan Accounting';
@@ -16,6 +16,17 @@ export interface AppReleaseNote {
 }
 
 export const APP_RELEASE_NOTES: AppReleaseNote[] = [
+  {
+    version: 'v2.7.6',
+    date: '2026.09.13',
+    title: '雲端帳本版本校準與同步版本號防落後機制 (banban_sync_version)',
+    highlights: [
+      '重構 records 狀態初始化邏輯：在讀取 localStorage 快取前嚴格比對 banban_sync_version 版本號',
+      '落後版本號主動阻絕：若偵測到本機快取版本號落後或格式陳舊，自動跳過舊本地快取，優先強制自雲端資料庫重新抓取最新帳本',
+      '雙重快取防禦網：開機初始化與本機綁定生命週期同步阻絕舊資料覆寫，確保帳本數據隨時與 Google 試算表雲端保持 100% 同步',
+      '自動補齊版本標籤：雲端抓取成功後即時固化最新同步版本號，實現無感切換與精準快取失效管理'
+    ]
+  },
   {
     version: 'v2.7.5',
     date: '2026.09.13',
@@ -262,4 +273,31 @@ export function getRuntimeEnvironmentInfo(
     hostingLabel,
     displayBadge
   };
+}
+
+/**
+ * 檢查同步快取版本號是否落後於目標版本
+ * 若快取版本為空、格式異常或數值小於目標版本，均視為落後 (outdated)
+ */
+export function isSyncVersionOutdated(
+  cachedVersion: string | null | undefined,
+  targetVersion: string = APP_VERSION
+): boolean {
+  if (!cachedVersion || typeof cachedVersion !== 'string') return true;
+  const cleanCached = cachedVersion.trim().replace(/^v/i, '');
+  const cleanTarget = targetVersion.trim().replace(/^v/i, '');
+  if (!cleanCached) return true;
+  if (cleanCached === cleanTarget) return false;
+
+  const cachedParts = cleanCached.split('.').map(p => parseInt(p, 10) || 0);
+  const targetParts = cleanTarget.split('.').map(p => parseInt(p, 10) || 0);
+
+  const maxLen = Math.max(cachedParts.length, targetParts.length);
+  for (let i = 0; i < maxLen; i++) {
+    const c = cachedParts[i] ?? 0;
+    const t = targetParts[i] ?? 0;
+    if (c < t) return true;
+    if (c > t) return false;
+  }
+  return false;
 }

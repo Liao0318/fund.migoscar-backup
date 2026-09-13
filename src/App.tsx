@@ -141,6 +141,7 @@ import {
 import { doc, onSnapshot } from 'firebase/firestore';
 import { syncGoogleUserProfile, signOutGoogle, db } from './utils/googleOAuthService';
 import { hasBackendServer } from './utils/environment';
+import { APP_VERSION, isSyncVersionOutdated } from './version';
 
 
 // 定義購物記事資料型態
@@ -506,6 +507,26 @@ export default function App() {
           const isPartner = parsedUser.userRole === 'partner';
           // 若無資料庫連線，一律為全新乾淨空帳本
           if (!hasUserGas && !isPartner) {
+            return [];
+          }
+
+          // 🚀 關鍵版本檢查：在讀取 localStorage 前先檢查 banban_sync_version 版本號
+          const userSyncVersion = cleanEmail ? localStorage.getItem(`banban_sync_version_${cleanEmail}`) : null;
+          const syncVersion = userSyncVersion || localStorage.getItem('banban_sync_version');
+          const isOutdated = isSyncVersionOutdated(syncVersion, APP_VERSION);
+
+          if (isOutdated) {
+            // 偵測到版本號落後，優先標記需強制重新抓取最新雲端帳本，絕不採用過期的舊本地快取
+            try {
+              sessionStorage.setItem('banban_force_fresh_cloud_fetch', 'true');
+              localStorage.setItem('banban_pending_cloud_refresh', 'true');
+            } catch (e) {}
+            // 觸發自雲端強制重新抓取的自訂事件（在下個微任務執行）
+            if (typeof window !== 'undefined') {
+              setTimeout(() => {
+                window.dispatchEvent(new CustomEvent('banban-force-cloud-sync'));
+              }, 0);
+            }
             return [];
           }
 
@@ -970,6 +991,9 @@ export default function App() {
           localStorage.removeItem('banban_split_records');
           localStorage.removeItem('banban_shopping_items');
           localStorage.removeItem('banban_partner_binding');
+          localStorage.removeItem('banban_sync_version');
+          if (cleanEmail) localStorage.removeItem(`banban_sync_version_${cleanEmail}`);
+          if (previousEmail) localStorage.removeItem(`banban_sync_version_${previousEmail}`);
           window.dispatchEvent(new CustomEvent('travel-data-updated', {
             detail: { trips: [], expenses: [], wishlist: [] }
           }));
@@ -1330,7 +1354,16 @@ export default function App() {
         if (hasCloudLedger && serverLedgerData) {
           if (Array.isArray(serverLedgerData.records) && serverLedgerData.records.length > 0) {
             setRecords(serverLedgerData.records);
-            try { localStorage.setItem('muji_ledger_data', JSON.stringify(serverLedgerData.records)); } catch (e) {}
+            try { 
+              localStorage.setItem('muji_ledger_data', JSON.stringify(serverLedgerData.records)); 
+              if (cleanEmail) {
+                localStorage.setItem(`muji_ledger_data_${cleanEmail}`, JSON.stringify(serverLedgerData.records));
+              }
+              localStorage.setItem('banban_sync_version', APP_VERSION);
+              if (cleanEmail) {
+                localStorage.setItem(`banban_sync_version_${cleanEmail}`, APP_VERSION);
+              }
+            } catch (e) {}
           }
           if (Array.isArray(serverLedgerData.splitItems) && serverLedgerData.splitItems.length > 0) {
             setSplitItems(serverLedgerData.splitItems);
@@ -1900,10 +1933,12 @@ export default function App() {
       localStorage.removeItem('banban_split_records');
       localStorage.removeItem('banban_shopping_items');
       localStorage.removeItem('banban_partner_binding');
+      localStorage.removeItem('banban_sync_version');
       if (cleanEmail) {
         localStorage.removeItem(`muji_gas_web_url_${cleanEmail}`);
         localStorage.removeItem(`muji_sheet_url_${cleanEmail}`);
         localStorage.removeItem(`muji_ledger_data_${cleanEmail}`);
+        localStorage.removeItem(`banban_sync_version_${cleanEmail}`);
       }
       window.dispatchEvent(new CustomEvent('travel-data-updated', {
         detail: { trips: [], expenses: [], wishlist: [] }
@@ -2278,6 +2313,15 @@ export default function App() {
     return subscribeSyncStatus(setPendingSyncQueue);
   }, []);
 
+  // 🚀 監聽版本落後或強制刷新事件：立即從雲端重新抓取最新帳本
+  useEffect(() => {
+    const handleForceSync = () => {
+      fetchDashboardData(false, false);
+    };
+    window.addEventListener('banban-force-cloud-sync', handleForceSync);
+    return () => window.removeEventListener('banban-force-cloud-sync', handleForceSync);
+  }, []);
+
   const handleFlushQueue = async () => {
     setIsSyncingGas(true);
     try {
@@ -2349,6 +2393,15 @@ export default function App() {
     try {
       const res = await callGasApi('getDashboardData', undefined, overrideGasUrl);
       if (res && res.success) {
+        const cleanEmail = (currentUser?.email || '').trim().toLowerCase();
+        try {
+          localStorage.setItem('banban_sync_version', APP_VERSION);
+          if (cleanEmail) {
+            localStorage.setItem(`banban_sync_version_${cleanEmail}`, APP_VERSION);
+          }
+          localStorage.removeItem('banban_pending_cloud_refresh');
+        } catch (e) {}
+
         if (Array.isArray(res.records)) {
           const healed = sanitizeAndHealRecords(res.records);
           setRecords(prev => {
@@ -2357,10 +2410,24 @@ export default function App() {
             const nextStr = JSON.stringify(healed);
             if (prevStr !== nextStr) {
               localStorage.setItem('muji_ledger_data', nextStr);
+              if (cleanEmail) {
+                localStorage.setItem(`muji_ledger_data_${cleanEmail}`, nextStr);
+              }
               return healed;
             }
             return prev;
           });
+          try {
+            if (cleanEmail) {
+              localStorage.setItem(`muji_ledger_data_${cleanEmail}`, JSON.stringify(healed));
+            }
+          } catch (e) {}
+          if (healed.length > 0) {
+            const uniqueMonths = Array.from(new Set(healed.map((r: any) => r.month))).sort((a: any, b: any) => b.localeCompare(a));
+            if (uniqueMonths.length > 0) {
+              setSettlementMonth(prev => prev || (uniqueMonths[0] as string));
+            }
+          }
         }
         if (Array.isArray(res.reconciledMonths)) {
           setReconciledMonths(prev => {
@@ -4270,6 +4337,19 @@ export default function App() {
         const parsed = JSON.parse(authUser);
         cleanEmail = (parsed.email || '').trim().toLowerCase();
       } catch (e) {}
+    }
+
+    // 🚀 在讀取 localStorage 前先檢查 banban_sync_version 版本號
+    const userSyncVersion = cleanEmail ? localStorage.getItem(`banban_sync_version_${cleanEmail}`) : null;
+    const syncVersion = userSyncVersion || localStorage.getItem('banban_sync_version');
+    const isOutdated = isSyncVersionOutdated(syncVersion, APP_VERSION);
+
+    if (isOutdated) {
+      // 偵測到版本號落後，不載入本地舊緩存，優先強制自雲端抓取
+      setRecords([]);
+      setSettlementMonth('');
+      fetchDashboardData(false, false);
+      return;
     }
 
     const userSaved = cleanEmail ? localStorage.getItem(`muji_ledger_data_${cleanEmail}`) : null;
