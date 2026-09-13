@@ -3,7 +3,7 @@
  * 集中管理版本號、建置時間、環境識別與更新日誌
  */
 
-export const APP_VERSION = 'v2.7.3';
+export const APP_VERSION = 'v2.7.5';
 export const APP_BUILD_DATE = '2026.09.13';
 export const APP_NAME = '伴伴記';
 export const APP_FULL_NAME = '伴伴記 • BanBan Accounting';
@@ -16,6 +16,28 @@ export interface AppReleaseNote {
 }
 
 export const APP_RELEASE_NOTES: AppReleaseNote[] = [
+  {
+    version: 'v2.7.5',
+    date: '2026.09.13',
+    title: 'Google 帳號跨裝置雲端資料庫強制優先對齊與快取逆向覆蓋阻絕',
+    highlights: [
+      '徹底解決在其他裝置或新瀏覽器登入相同 Google 帳號時，因讀取本地殘留快取導致資料庫不同步、網址空白或錯誤的問題',
+      '重構登入與同步流程：登入時啟用 forceRefresh 機制，強制以 Google 帳號雲端（Google Drive / Firestore / 伺服器）作為資料庫配置唯一來源，不優先採用本地舊設定',
+      '阻絕逆向覆蓋：開機時不再將其他裝置未登入或舊帳號的本機快取覆蓋至雲端，確保雲端正確的試算表與 GAS 網址完整保持',
+      '跨裝置帳本數據立即掛接：登入後自動調用雲端資料庫並立即拉取最新帳本、分帳與出遊紀錄，實現不同裝置間 100% 一致體驗'
+    ]
+  },
+  {
+    version: 'v2.7.4',
+    date: '2026.09.13',
+    title: '跨裝置 Google 帳號雲端資料庫全自動同步與快取防覆蓋校準',
+    highlights: [
+      '徹底修復在其他裝置登入同一個 Google 帳號時，因讀取本地殘留快取導致資料庫網址不一致或錯誤的問題',
+      '重構登入與資料庫同步生命週期：登入 Google 帳號時強制優先自雲端（Google Drive / Firestore / 伺服器 API）獲取最新資料庫設定',
+      '開機與切換帳號時，以登入 Google 帳號的雲端最新配置為唯一準則，防止舊裝置本機殘留快取逆向覆蓋雲端正確資料庫',
+      '強化跨裝置即時拉取機制：多裝置登入成功後立即無縫載入最新雲端帳本、代墊分帳與生活清單'
+    ]
+  },
   {
     version: 'v2.7.3',
     date: '2026.09.13',

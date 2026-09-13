@@ -1193,8 +1193,9 @@ export default function App() {
       } catch (e) {}
 
       // 3. 檢查此帳號先前是否曾建立過專屬 API 資料庫 (主管理員)
-      let activeGas = initialCloudGasUrl || cachedPerUserGas || '';
-      let activeSheet = initialCloudSheetUrl || cachedPerUserSheet || '';
+      // 🚀 跨裝置優先：先嘗試從傳入的雲端快照獲取，否則優先直查雲端，最後才降級至本地快取
+      let activeGas = initialCloudGasUrl || '';
+      let activeSheet = initialCloudSheetUrl || '';
 
       // 2.9 🚀 全端跨裝置帳本數據無縫掛接 (換裝置、換手機登入直接掛接帳本資料庫)
       let serverLedgerData: any = null;
@@ -1217,7 +1218,7 @@ export default function App() {
       }
 
       try {
-        const cloudConfig = await getUserCloudConfig(user.email);
+        const cloudConfig = await getUserCloudConfig(user.email, { forceRefresh: true });
         if (cloudConfig) {
           if (cloudConfig.nickname && !boundNickname) {
             boundNickname = cloudConfig.nickname;
@@ -1292,13 +1293,18 @@ export default function App() {
         } catch (e) {}
       }
 
-      // 🛡️ 雙重保險備援 4：全域本地鍵值深度復原掃描
+      // 🛡️ 雙重保險備援 4：本地快取與全域本地鍵值深度復原掃描（僅在雲端完全無紀錄時降級使用）
       if (!activeGas && cleanEmail) {
-        const recovered = scanAndRecoverGasUrl(cleanEmail);
-        if (recovered.gasWebUrl) {
-          activeGas = recovered.gasWebUrl;
-          if (recovered.deploySheetUrl && !activeSheet) {
-            activeSheet = recovered.deploySheetUrl;
+        if (cachedPerUserGas && cachedPerUserGas.startsWith('http')) {
+          activeGas = cachedPerUserGas;
+          activeSheet = cachedPerUserSheet || activeSheet || '';
+        } else {
+          const recovered = scanAndRecoverGasUrl(cleanEmail);
+          if (recovered.gasWebUrl) {
+            activeGas = recovered.gasWebUrl;
+            if (recovered.deploySheetUrl && !activeSheet) {
+              activeSheet = recovered.deploySheetUrl;
+            }
           }
         }
       }
@@ -2761,15 +2767,47 @@ export default function App() {
   useEffect(() => {
     const syncSystemDatabase = async () => {
       const cleanEmail = (currentUser?.email || '').trim().toLowerCase();
-      // 1. 若此裝置本地存有有效網址，立刻上傳同步至伺服器，使手機或另一台裝置即刻可用
+      
+      // 🚀 關鍵防護：若使用者已登入，跨裝置同步時應優先向雲端（Google Drive / Firestore / 後端）確認最新資料庫
+      if (cleanEmail) {
+        try {
+          const userConfig = await getUserCloudConfig(cleanEmail, { forceRefresh: true });
+          if (userConfig && userConfig.gasWebUrl && userConfig.gasWebUrl.startsWith('http')) {
+            const uGas = userConfig.gasWebUrl.trim();
+            const uSheet = (userConfig.deploySheetUrl || '').trim();
+            setGasWebUrl(uGas);
+            if (uSheet) setDeploySheetUrl(uSheet);
+            try {
+              localStorage.setItem('muji_gas_web_url', uGas);
+              localStorage.setItem(`muji_gas_web_url_${cleanEmail}`, uGas);
+              localStorage.setItem('banban_permanent_gas_url', uGas);
+              localStorage.setItem(`banban_permanent_gas_url_${cleanEmail}`, uGas);
+              localStorage.setItem('banban_device_master_gas', uGas);
+              if (uSheet) {
+                localStorage.setItem('muji_sheet_url', uSheet);
+                localStorage.setItem(`muji_sheet_url_${cleanEmail}`, uSheet);
+                localStorage.setItem('banban_permanent_sheet_url', uSheet);
+              }
+            } catch (e) {}
+            // 🚀 關鍵修復：立即自動拉取試算表最新帳本明細
+            fetchDashboardData(false, true, uGas);
+            fetchShoppingData(true, uGas);
+            fetchSplitData(true, uGas);
+            fetchTravelData(true, uGas);
+            return;
+          }
+        } catch (e) {}
+      }
+
+      // 1. 若雲端尚未有設定，但此裝置本地存有該使用者專屬有效網址，才上傳同步至伺服器
       const localGas = (cleanEmail ? localStorage.getItem(`muji_gas_web_url_${cleanEmail}`) : null) ||
-        localStorage.getItem('muji_gas_web_url') || 
+        (!cleanEmail ? (localStorage.getItem('muji_gas_web_url') || 
         localStorage.getItem('banban_permanent_gas_url') || 
-        localStorage.getItem('banban_device_master_gas');
+        localStorage.getItem('banban_device_master_gas')) : null);
       const localSheet = (cleanEmail ? localStorage.getItem(`muji_sheet_url_${cleanEmail}`) : null) ||
-        localStorage.getItem('muji_sheet_url') || 
+        (!cleanEmail ? (localStorage.getItem('muji_sheet_url') || 
         localStorage.getItem('banban_permanent_sheet_url') || 
-        localStorage.getItem('banban_device_master_sheet');
+        localStorage.getItem('banban_device_master_sheet')) : null);
       
       if (localGas && localGas.trim().startsWith('http')) {
         const safeGas = localGas.trim();
@@ -2802,34 +2840,7 @@ export default function App() {
           } catch (e) {}
         }
       } else {
-        // 2. 若此裝置本地無網址，主動向伺服器拉取系統既有資料庫或使用者個人雲端
-        if (cleanEmail) {
-          try {
-            const userConfig = await getUserCloudConfig(cleanEmail);
-            if (userConfig && userConfig.gasWebUrl && userConfig.gasWebUrl.startsWith('http')) {
-              const uGas = userConfig.gasWebUrl.trim();
-              const uSheet = (userConfig.deploySheetUrl || '').trim();
-              setGasWebUrl(uGas);
-              if (uSheet) setDeploySheetUrl(uSheet);
-              try {
-                localStorage.setItem('muji_gas_web_url', uGas);
-                localStorage.setItem('banban_permanent_gas_url', uGas);
-                localStorage.setItem('banban_device_master_gas', uGas);
-                if (uSheet) {
-                  localStorage.setItem('muji_sheet_url', uSheet);
-                  localStorage.setItem('banban_permanent_sheet_url', uSheet);
-                }
-              } catch (e) {}
-              // 🚀 關鍵修復：立即自動拉取試算表最新帳本明細
-              fetchDashboardData(false, true, uGas);
-              fetchShoppingData(true, uGas);
-              fetchSplitData(true, uGas);
-              fetchTravelData(true, uGas);
-              return;
-            }
-          } catch (e) {}
-        }
-
+        // 2. 若此裝置本地無網址，向伺服器系統資料庫拉取
         if (hasBackendServer()) {
           try {
             const res = await fetch('/api/system-database');

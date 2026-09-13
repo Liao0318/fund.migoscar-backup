@@ -113,34 +113,9 @@ export const GoogleAuthPortal: React.FC<GoogleAuthPortalProps> = ({
     let savedNickname = '';
     const cleanEmail = (rawUser.email || '').trim().toLowerCase();
 
-    // 1. 本地讀取綁定的專屬暱稱與既有資料庫設定（多層備援，確保同裝置登入零遺失）
+    // 1. 🚀 跨裝置唯一真理：優先強制自雲端（Google Drive / Firestore / 伺服器 API）獲取該帳號最新資料庫配置
     try {
-      if (cleanEmail) {
-        savedNickname = localStorage.getItem(`banban_user_nickname_${cleanEmail}`) || '';
-        const userGas = localStorage.getItem(`muji_gas_web_url_${cleanEmail}`);
-        const userSheet = localStorage.getItem(`muji_sheet_url_${cleanEmail}`);
-        if (userGas && userGas.trim().startsWith('http')) {
-          cloudGas = userGas.trim();
-        }
-        if (userSheet) {
-          cloudSheet = userSheet.trim();
-        }
-      }
-      // 深度全域與本機多層級掃描復原
-      if (!cloudGas) {
-        const recovered = scanAndRecoverGasUrl(cleanEmail);
-        if (recovered.gasWebUrl) {
-          cloudGas = recovered.gasWebUrl;
-          if (recovered.deploySheetUrl && !cloudSheet) {
-            cloudSheet = recovered.deploySheetUrl;
-          }
-        }
-      }
-    } catch (e) {}
-
-    // 2. 雲端讀取 Firestore 個人專屬設定（跨裝置或重新登入）
-    try {
-      const existingConfig = await getUserCloudConfig(rawUser.email);
+      const existingConfig = await getUserCloudConfig(rawUser.email, { forceRefresh: true });
       if (existingConfig) {
         if (existingConfig.gasWebUrl && existingConfig.gasWebUrl.trim().startsWith('http')) {
           cloudGas = existingConfig.gasWebUrl.trim();
@@ -209,6 +184,35 @@ export const GoogleAuthPortal: React.FC<GoogleAuthPortalProps> = ({
       }
     } catch (e) {
       console.warn('Failed to load user cloud config:', e);
+    }
+
+    // 2. 本地回退：僅在雲端完全查無設定時，才回退讀取本地專屬備援
+    if (!cloudGas) {
+      try {
+        if (cleanEmail) {
+          if (!savedNickname) {
+            savedNickname = localStorage.getItem(`banban_user_nickname_${cleanEmail}`) || '';
+          }
+          const userGas = localStorage.getItem(`muji_gas_web_url_${cleanEmail}`);
+          const userSheet = localStorage.getItem(`muji_sheet_url_${cleanEmail}`);
+          if (userGas && userGas.trim().startsWith('http')) {
+            cloudGas = userGas.trim();
+          }
+          if (userSheet) {
+            cloudSheet = userSheet.trim();
+          }
+        }
+        // 深度全域與本機多層級掃描復原
+        if (!cloudGas) {
+          const recovered = scanAndRecoverGasUrl(cleanEmail);
+          if (recovered.gasWebUrl) {
+            cloudGas = recovered.gasWebUrl;
+            if (recovered.deploySheetUrl && !cloudSheet) {
+              cloudSheet = recovered.deploySheetUrl;
+            }
+          }
+        }
+      } catch (e) {}
     }
 
     // 💖 優先解析待綁定之伴侶邀請

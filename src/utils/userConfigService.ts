@@ -321,11 +321,17 @@ export async function saveUserCloudConfig(email: string, config: Partial<UserClo
 }
 
 /**
- * 取得使用者的專屬個人化設定（優先從後端 API / 全系統資料庫 / Firestore 雲端讀取，降級讀取本地與深度掃描）
+ * 取得使用者的專屬個人化設定（優先從後端 API / Google Drive / Firestore 雲端讀取最新設定，避免跨裝置時讀取舊本機快取）
+ * @param email 使用者 Google Email
+ * @param options.forceRefresh 若為 true（例如登入或跨裝置同步），跳過本地快取直查雲端
  */
-export async function getUserCloudConfig(email: string): Promise<UserCloudConfig | null> {
+export async function getUserCloudConfig(
+  email: string,
+  options: { forceRefresh?: boolean } = {}
+): Promise<UserCloudConfig | null> {
   if (!email) return null;
   const cleanEmail = email.trim().toLowerCase();
+  const forceRefresh = Boolean(options.forceRefresh);
 
   // 1. 優先從伺服器持久化 API 讀取（僅在有伺服器環境下調用，GitHub Pages 跳過此步驟以避免 404）
   if (hasBackendServer()) {
@@ -358,37 +364,7 @@ export async function getUserCloudConfig(email: string): Promise<UserCloudConfig
     } catch (e) {}
   }
 
-  // 1.5 檢查全系統資料庫（若伺服器已記錄）
-  if (hasBackendServer()) {
-    try {
-      const sysRes = await asyncWithTimeout(fetch('/api/system-database'), 1500, null as any);
-      if (sysRes && sysRes.ok) {
-        const sysData = await sysRes.json();
-        if (sysData && sysData.success && sysData.database && sysData.database.gasWebUrl) {
-          const sysDb = sysData.database;
-          const synthesized: UserCloudConfig = {
-            email: cleanEmail,
-            name: '',
-            gasWebUrl: sysDb.gasWebUrl,
-            deploySheetUrl: sysDb.deploySheetUrl || '',
-            updatedAt: sysDb.updatedAt || new Date().toISOString()
-          };
-          try {
-            localStorage.setItem(`${LOCAL_USER_CONFIG_PREFIX}${cleanEmail}`, JSON.stringify(synthesized));
-            localStorage.setItem('muji_gas_web_url', synthesized.gasWebUrl!);
-            localStorage.setItem(`muji_gas_web_url_${cleanEmail}`, synthesized.gasWebUrl!);
-            localStorage.setItem('banban_permanent_gas_url', synthesized.gasWebUrl!);
-            localStorage.setItem(`banban_permanent_gas_url_${cleanEmail}`, synthesized.gasWebUrl!);
-            localStorage.setItem('banban_device_master_gas', synthesized.gasWebUrl!);
-            localStorage.setItem(`banban_user_has_logged_in_${cleanEmail}`, 'true');
-          } catch (e) {}
-          return synthesized;
-        }
-      }
-    } catch (e) {}
-  }
-
-  // 1.8 真正跟隨 Google 帳號無縫同步：從使用者個人的 Google Drive 讀取設定檔
+  // 1.5 真正跟隨 Google 帳號無縫同步：從使用者個人的 Google Drive 讀取設定檔
   const driveToken = getGoogleAccessToken();
   if (driveToken) {
     try {
@@ -449,39 +425,73 @@ export async function getUserCloudConfig(email: string): Promise<UserCloudConfig
     } catch (err) {}
   }
 
-  // 3. 讀取本地快取
-  try {
-    const cached = localStorage.getItem(`${LOCAL_USER_CONFIG_PREFIX}${cleanEmail}`);
-    if (cached) {
-      const parsed = JSON.parse(cached);
-      if (parsed && parsed.gasWebUrl && parsed.gasWebUrl.startsWith('http')) {
-        return parsed;
-      }
-    }
-  } catch (e) {}
-
-  // 4. 深度掃描全域本機設定備援
-  const recovered = scanAndRecoverGasUrl(cleanEmail);
-  if (recovered.gasWebUrl) {
-    const recoveredConfig: UserCloudConfig = {
-      email: cleanEmail,
-      name: '',
-      gasWebUrl: recovered.gasWebUrl,
-      deploySheetUrl: recovered.deploySheetUrl,
-      updatedAt: new Date().toISOString()
-    };
+  // 2.5 檢查全系統資料庫（若伺服器已記錄）
+  if (hasBackendServer()) {
     try {
-      localStorage.setItem(`${LOCAL_USER_CONFIG_PREFIX}${cleanEmail}`, JSON.stringify(recoveredConfig));
+      const sysRes = await asyncWithTimeout(fetch('/api/system-database'), 1500, null as any);
+      if (sysRes && sysRes.ok) {
+        const sysData = await sysRes.json();
+        if (sysData && sysData.success && sysData.database && sysData.database.gasWebUrl) {
+          const sysDb = sysData.database;
+          const synthesized: UserCloudConfig = {
+            email: cleanEmail,
+            name: '',
+            gasWebUrl: sysDb.gasWebUrl,
+            deploySheetUrl: sysDb.deploySheetUrl || '',
+            updatedAt: sysDb.updatedAt || new Date().toISOString()
+          };
+          try {
+            localStorage.setItem(`${LOCAL_USER_CONFIG_PREFIX}${cleanEmail}`, JSON.stringify(synthesized));
+            localStorage.setItem('muji_gas_web_url', synthesized.gasWebUrl!);
+            localStorage.setItem(`muji_gas_web_url_${cleanEmail}`, synthesized.gasWebUrl!);
+            localStorage.setItem('banban_permanent_gas_url', synthesized.gasWebUrl!);
+            localStorage.setItem(`banban_permanent_gas_url_${cleanEmail}`, synthesized.gasWebUrl!);
+            localStorage.setItem('banban_device_master_gas', synthesized.gasWebUrl!);
+            localStorage.setItem(`banban_user_has_logged_in_${cleanEmail}`, 'true');
+          } catch (e) {}
+          return synthesized;
+        }
+      }
     } catch (e) {}
-    // 異步同步至伺服器 API（僅在有後端伺服器環境下調用）
-    if (hasBackendServer()) {
-      fetch('/api/user-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(recoveredConfig)
-      }).catch(() => {});
+  }
+
+  // 3. 讀取本地快取（若未強制要求自雲端刷新）
+  if (!forceRefresh) {
+    try {
+      const cached = localStorage.getItem(`${LOCAL_USER_CONFIG_PREFIX}${cleanEmail}`);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.gasWebUrl && parsed.gasWebUrl.startsWith('http')) {
+          return parsed;
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 4. 深度掃描全域本機設定備援（若未強制要求自雲端刷新）
+  if (!forceRefresh) {
+    const recovered = scanAndRecoverGasUrl(cleanEmail);
+    if (recovered.gasWebUrl) {
+      const recoveredConfig: UserCloudConfig = {
+        email: cleanEmail,
+        name: '',
+        gasWebUrl: recovered.gasWebUrl,
+        deploySheetUrl: recovered.deploySheetUrl,
+        updatedAt: new Date().toISOString()
+      };
+      try {
+        localStorage.setItem(`${LOCAL_USER_CONFIG_PREFIX}${cleanEmail}`, JSON.stringify(recoveredConfig));
+      } catch (e) {}
+      // 異步同步至伺服器 API（僅在有後端伺服器環境下調用）
+      if (hasBackendServer()) {
+        fetch('/api/user-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(recoveredConfig)
+        }).catch(() => {});
+      }
+      return recoveredConfig;
     }
-    return recoveredConfig;
   }
 
   return null;

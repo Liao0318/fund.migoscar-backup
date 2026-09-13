@@ -574,8 +574,8 @@ export const UnifiedDatabaseModal: React.FC<UnifiedDatabaseModalProps> = ({
     if (!silent) setCloudSearchStatus('正在為您的 Google 帳號查詢雲端資料庫...');
     try {
       const cleanEmail = currentUser.email.trim().toLowerCase();
-      // 1. 優先查詢使用者個人雲端設定 (後端 API / Firestore)
-      const cloudConfig = await getUserCloudConfig(cleanEmail);
+      // 1. 優先查詢使用者個人雲端設定 (後端 API / Google Drive / Firestore)
+      const cloudConfig = await getUserCloudConfig(cleanEmail, { forceRefresh: true });
       if (cloudConfig?.gasWebUrl && cloudConfig.gasWebUrl.startsWith('http')) {
         setDetectedGasUrl(cloudConfig.gasWebUrl);
         if (cloudConfig.deploySheetUrl) setDetectedSheetUrl(cloudConfig.deploySheetUrl);
