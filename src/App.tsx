@@ -289,15 +289,67 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
   if (!r || typeof r !== 'object') return r;
   let rec = { ...r };
 
-  // 1. 偵測欄位位移特徵：
-  // 特徵 A：month 存放的是 ID (例如 'rec_1789220107510_4663')
-  const monthLooksLikeId = typeof rec.month === 'string' && (rec.month.startsWith('rec_') || rec.month.length > 12);
-  // 特徵 B：item 存放的是完整日期時間字串 (例如 'Sun Sep 06 2026 00:00:00 GMT+0800 (台北標準時間)')
+  // 1. 智慧日期與月份解析與正規化
+  let normalizedDate = '';
+  let normalizedMonth = '';
+
+  // 檢查 date 欄位
+  if (rec.date) {
+    if (rec.date instanceof Date) {
+      try {
+        const pad = (n: number) => String(n).padStart(2, '0');
+        normalizedDate = `${rec.date.getFullYear()}-${pad(rec.date.getMonth() + 1)}-${pad(rec.date.getDate())}`;
+      } catch (e) {}
+    } else if (typeof rec.date === 'string') {
+      const dMatch = rec.date.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+      if (dMatch) {
+        normalizedDate = `${dMatch[1]}-${dMatch[2].padStart(2, '0')}-${dMatch[3].padStart(2, '0')}`;
+      } else {
+        const mMatch = rec.date.match(/(\d{4})[-/](\d{1,2})/);
+        if (mMatch) {
+          normalizedDate = `${mMatch[1]}-${mMatch[2].padStart(2, '0')}-01`;
+        }
+      }
+    }
+  }
+
+  // 檢查 month 欄位
+  if (rec.month) {
+    if (rec.month instanceof Date) {
+      try {
+        const pad = (n: number) => String(n).padStart(2, '0');
+        normalizedMonth = `${rec.month.getFullYear()}-${pad(rec.month.getMonth() + 1)}`;
+      } catch (e) {}
+    } else if (typeof rec.month === 'string') {
+      const mMatch = rec.month.match(/(\d{4})[-/](\d{1,2})/);
+      if (mMatch) {
+        normalizedMonth = `${mMatch[1]}-${mMatch[2].padStart(2, '0')}`;
+      }
+    }
+  }
+
+  // 互補推導
+  if (!normalizedMonth && normalizedDate) {
+    normalizedMonth = normalizedDate.substring(0, 7);
+  }
+  if (!normalizedDate && normalizedMonth) {
+    normalizedDate = `${normalizedMonth}-01`;
+  }
+  if (!normalizedMonth) {
+    normalizedMonth = new Date().toISOString().substring(0, 7);
+  }
+  if (!normalizedDate) {
+    normalizedDate = `${normalizedMonth}-01`;
+  }
+
+  // 2. 欄位錯位真實偵測（僅在欄位發生跨欄推移時觸發）
+  // 特徵 A：month 存放的是真實 ID（以 'rec_' 開頭）
+  const monthLooksLikeId = typeof rec.month === 'string' && rec.month.trim().startsWith('rec_');
+  // 特徵 B：item 存放的是完整日期時間物件字串且原 date 欄位並非日期
   const itemLooksLikeDate = typeof rec.item === 'string' && (
     rec.item.includes('GMT') || 
     rec.item.includes('台北標準時間') || 
-    /^[A-Z][a-z]{2}\s[A-Z][a-z]{2}\s\d{1,2}\s\d{4}/.test(rec.item) ||
-    /^\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{2}:\d{2}/.test(rec.item)
+    /^[A-Z][a-z]{2}\s[A-Z][a-z]{2}\s\d{1,2}\s\d{4}/.test(rec.item)
   );
 
   if (monthLooksLikeId || itemLooksLikeDate) {
@@ -305,7 +357,7 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
     const trueId = (monthLooksLikeId ? rec.month : rec.id) || `rec_${Date.now()}`;
 
     // 還原日期
-    let trueDate = '';
+    let trueDate = normalizedDate;
     if (itemLooksLikeDate) {
       try {
         const d = new Date(rec.item);
@@ -315,26 +367,18 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
         }
       } catch (e) {}
     }
-    if (!trueDate && typeof rec.date === 'string') {
-      const match = rec.date.match(/\d{4}-\d{2}(-\d{2})?/);
-      if (match) {
-        trueDate = match[0].length === 7 ? `${match[0]}-01` : match[0];
-      }
-    }
-    if (!trueDate) trueDate = new Date().toISOString().split('T')[0];
-
     const trueMonth = trueDate.substring(0, 7);
 
     // 還原項目描述
-    const trueItem = (rec.payer && !['廖', '周', '廖尹丞', '周沛緹', '小廖', '小周', '共同帳戶'].includes(rec.payer))
+    const trueItem = (rec.payer && !['廖', '周', '廖尹丞', '周沛緹', '小廖', '小周', '共同帳戶', '共同', '待確認伴侶', '待確認', '待'].includes(rec.payer))
       ? rec.payer
-      : (itemLooksLikeDate ? '日常生活支出' : rec.item);
+      : (itemLooksLikeDate ? '日常生活支出' : (rec.item || '日常生活支出'));
 
-    // 還原金額：檢查 rec.type 是否為數值，或者 rec.amount
+    // 還原金額
     let trueAmount = 0;
     const typeClean = String(rec.type || '').trim();
     const typeNum = parseFloat(typeClean.replace(/[^0-9.]/g, ''));
-    if (!isNaN(typeNum) && typeNum > 0 && !typeClean.includes('撥入') && !typeClean.includes('支出') && !typeClean.includes('公積金')) {
+    if (!isNaN(typeNum) && typeNum > 0 && !typeClean.includes('撥入') && !typeClean.includes('支出') && !typeClean.includes('公積金') && !typeClean.includes('收入')) {
       trueAmount = typeNum;
     } else {
       const amtNum = parseFloat(String(rec.amount || '').replace(/[^0-9.]/g, ''));
@@ -343,19 +387,32 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
       }
     }
 
-    // 還原付款人
-    let truePayer = '廖尹丞';
-    const allContext = `${rec.amount || ''} ${rec.type || ''} ${rec.timestamp || ''} ${rec.payer || ''}`;
-    if (allContext.includes('周沛緹') || allContext.includes('沛緹') || allContext.includes('周')) {
-      truePayer = '周沛緹';
-    } else if (allContext.includes('廖尹丞') || allContext.includes('尹丞') || allContext.includes('廖')) {
-      truePayer = '廖尹丞';
+    // 還原類型：嚴格判別收入與公積金注資
+    let trueType: '支出-日常代墊' | '收入-固定公積金' = '支出-日常代墊';
+    const allText = `${rec.type || ''} ${rec.item || ''} ${rec.timestamp || ''} ${rec.payer || ''}`;
+    if (
+      allText.includes('收入') || 
+      allText.includes('公積金') || 
+      allText.includes('撥入') || 
+      allText.includes('注資') || 
+      allText.includes('底池')
+    ) {
+      trueType = '收入-固定公積金';
+    } else {
+      trueType = '支出-日常代墊';
     }
 
-    // 還原類型
-    let trueType: '支出-日常代墊' | '收入-固定公積金' = '支出-日常代墊';
-    if (String(rec.timestamp || '').includes('撥入') || String(rec.type || '').includes('撥入') || String(rec.item || '').includes('撥入')) {
-      trueType = '收入-固定公積金';
+    // 還原付款人
+    let truePayer = String(rec.payer || '').trim();
+    if (trueType === '收入-固定公積金') {
+      truePayer = '共同帳戶';
+    } else if (!truePayer || truePayer === 'undefined' || truePayer === 'null') {
+      const allContext = `${rec.amount || ''} ${rec.type || ''} ${rec.timestamp || ''}`;
+      if (allContext.includes('周沛緹') || allContext.includes('沛緹') || allContext.includes('周') || allContext.includes('待')) {
+        truePayer = '周沛緹';
+      } else {
+        truePayer = '廖尹丞';
+      }
     }
 
     rec = {
@@ -369,20 +426,45 @@ export const sanitizeAndHealRecord = (r: any): RecordItem => {
       type: trueType,
       timestamp: `${trueDate} 12:00:00`
     };
-  }
+  } else {
+    // 無錯位正常情況：進行欄位內容標準化與防禦性校正
+    rec.month = normalizedMonth;
+    rec.date = normalizedDate;
+    rec.amount = Number(rec.amount) || 0;
 
-  // 二次確保 month 與 date 合法性
-  if (!rec.month || !/^\d{4}-\d{2}$/.test(rec.month)) {
-    if (rec.date && /^\d{4}-\d{2}/.test(rec.date)) {
-      rec.month = rec.date.substring(0, 7);
+    // 校正類型與付款人
+    const rawType = String(rec.type || '').trim();
+    const rawItem = String(rec.item || '').trim();
+    if (
+      rawType === '收入-固定公積金' || 
+      rawType.includes('收入') || 
+      rawType.includes('公積金') || 
+      rawType.includes('注資') || 
+      rawType.includes('撥入') ||
+      rawItem.includes('公積金') || 
+      rawItem.includes('注資') || 
+      rawItem.includes('撥入') || 
+      rawItem.includes('底池')
+    ) {
+      rec.type = '收入-固定公積金';
+      if (!rec.payer || rec.payer === '共同' || rec.payer === '共同基金') {
+        rec.payer = '共同帳戶';
+      }
     } else {
-      rec.month = new Date().toISOString().substring(0, 7);
+      rec.type = '支出-日常代墊';
+    }
+
+    // 確保 payer 正常
+    if (!rec.payer) {
+      rec.payer = rec.type === '收入-固定公積金' ? '共同帳戶' : '廖尹丞';
     }
   }
-  if (!rec.date) {
-    rec.date = `${rec.month}-01`;
+
+  // 確保 id 存在
+  if (!rec.id) {
+    rec.id = `rec_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   }
-  rec.amount = Number(rec.amount) || 0;
+
   return rec as RecordItem;
 };
 
@@ -697,14 +779,16 @@ export default function App() {
   const isUserAPayer = useCallback((p?: string) => {
     if (!p) return false;
     const clean = p.trim();
-    return clean === userA.name || clean === userA.displayName || clean === userA.shortName || clean.includes(userA.shortName) || clean === '廖尹丞' || clean === '廖';
-  }, [userA]);
+    if (isRecordOfUserA(clean, userA, userB)) return true;
+    return clean === userA.name || clean === userA.displayName || clean === userA.shortName || clean.includes(userA.shortName) || clean === '廖尹丞' || clean === '廖' || clean.includes('廖') || clean.includes('尹丞');
+  }, [userA, userB]);
 
   const isUserBPayer = useCallback((p?: string) => {
     if (!p) return false;
     const clean = p.trim();
-    return clean === userB.name || clean === userB.displayName || clean === userB.shortName || clean.includes(userB.shortName) || clean === '周沛緹' || clean === '周';
-  }, [userB]);
+    if (isRecordOfUserB(clean, userA, userB)) return true;
+    return clean === userB.name || clean === userB.displayName || clean === userB.shortName || clean.includes(userB.shortName) || clean === '周沛緹' || clean === '周' || clean.includes('周') || clean.includes('沛緹') || clean.includes('待') || clean.includes('伴侶');
+  }, [userA, userB]);
 
   const calculateLocalSplitSummary = useCallback((currentItems: SplitRecordItem[]) => {
     let liaoOwesZhou = 0;
@@ -3842,9 +3926,9 @@ export default function App() {
       showToast(`📊 ${summaryMsg}`, 'info');
 
       // 計算公積金最新結存
-      const curIncome = records.filter(r => r.type === '收入-固定公積金').reduce((s, r) => s + r.amount, 0);
-      const curDisbursed = records.filter(r => r.type.includes('支出') && isMonthReconciled(r.month, reconciledMonths)).reduce((s, r) => s + r.amount, 0);
-      const curPending = records.filter(r => r.type.includes('支出') && !isMonthReconciled(r.month, reconciledMonths)).reduce((s, r) => s + r.amount, 0);
+      const curIncome = records.filter(r => r.type === '收入-固定公積金' || r.type.includes('收入') || r.type.includes('公積金') || r.type.includes('注資')).reduce((s, r) => s + r.amount, 0);
+      const curDisbursed = records.filter(r => (r.type.includes('支出') || r.type.includes('代墊')) && isMonthReconciled(r.month, reconciledMonths)).reduce((s, r) => s + r.amount, 0);
+      const curPending = records.filter(r => (r.type.includes('支出') || r.type.includes('代墊')) && !isMonthReconciled(r.month, reconciledMonths)).reduce((s, r) => s + r.amount, 0);
       const curBalance = curIncome - curDisbursed;
       const curQuota = curBalance - curPending;
 
@@ -3930,8 +4014,8 @@ export default function App() {
           true // skipChatPush: true (避免在聊天室重複推播，由指令回傳精美卡片)
         );
         showToast(`已成功記錄公積金存入 NT$ ${amt.toLocaleString()}`, 'success');
-        const curIncome = updated.filter(r => r.type === '收入-固定公積金').reduce((s, r) => s + r.amount, 0);
-        const curDisbursed = updated.filter(r => r.type.includes('支出') && isMonthReconciled(r.month, reconciledMonths)).reduce((s, r) => s + r.amount, 0);
+        const curIncome = updated.filter(r => r.type === '收入-固定公積金' || r.type.includes('收入') || r.type.includes('公積金') || r.type.includes('注資')).reduce((s, r) => s + r.amount, 0);
+        const curDisbursed = updated.filter(r => (r.type.includes('支出') || r.type.includes('代墊')) && isMonthReconciled(r.month, reconciledMonths)).reduce((s, r) => s + r.amount, 0);
         const newBalance = curIncome - curDisbursed;
         return {
           success: true,
@@ -4787,26 +4871,26 @@ export default function App() {
 
   const liaoLatestTotal = React.useMemo(() => {
     return records
-      .filter(r => r.month === latestMonth && isUserAPayer(r.payer) && r.type.includes('支出'))
+      .filter(r => r.month === latestMonth && isUserAPayer(r.payer) && (r.type.includes('支出') || r.type.includes('代墊')))
       .reduce((sum, r) => sum + r.amount, 0);
   }, [records, latestMonth, isUserAPayer]);
 
   const zhouLatestTotal = React.useMemo(() => {
     return records
-      .filter(r => r.month === latestMonth && isUserBPayer(r.payer) && r.type.includes('支出'))
+      .filter(r => r.month === latestMonth && isUserBPayer(r.payer) && (r.type.includes('支出') || r.type.includes('代墊')))
       .reduce((sum, r) => sum + r.amount, 0);
   }, [records, latestMonth, isUserBPayer]);
 
   // 全域所有月份的累計代墊 (相容舊有狀態)
   const liaoTotal = React.useMemo(() => {
     return records
-      .filter(r => isUserAPayer(r.payer) && r.type.includes('支出'))
+      .filter(r => isUserAPayer(r.payer) && (r.type.includes('支出') || r.type.includes('代墊')))
       .reduce((sum, r) => sum + r.amount, 0);
   }, [records, isUserAPayer]);
 
   const zhouTotal = React.useMemo(() => {
     return records
-      .filter(r => isUserBPayer(r.payer) && r.type.includes('支出'))
+      .filter(r => isUserBPayer(r.payer) && (r.type.includes('支出') || r.type.includes('代墊')))
       .reduce((sum, r) => sum + r.amount, 0);
   }, [records, isUserBPayer]);
 
@@ -4816,9 +4900,9 @@ export default function App() {
     let disbursedExpenses = 0; // 已銷帳代墊
     let pendingExpenses = 0;   // 待銷帳代墊
     records.forEach(r => {
-      if (r.type === '收入-固定公積金') {
+      if (r.type === '收入-固定公積金' || r.type.includes('收入') || r.type.includes('公積金') || r.type.includes('注資') || r.type.includes('撥入')) {
         income += r.amount;
-      } else if (r.type.includes('支出')) {
+      } else if (r.type.includes('支出') || r.type.includes('代墊')) {
         // 判斷是否屬於已核銷/已結清月份
         if (isMonthReconciled(r.month, reconciledMonths)) {
           disbursedExpenses += r.amount;
@@ -4848,9 +4932,9 @@ export default function App() {
       if (!stats[m]) {
         stats[m] = { income: 0, expenses: 0, deficit: 0, liaoExp: 0, zhouExp: 0 };
       }
-      if (r.type === '收入-固定公積金') {
+      if (r.type === '收入-固定公積金' || r.type.includes('收入') || r.type.includes('公積金') || r.type.includes('注資') || r.type.includes('撥入')) {
         stats[m].income += r.amount;
-      } else if (r.type.includes('支出')) {
+      } else if (r.type.includes('支出') || r.type.includes('代墊')) {
         stats[m].expenses += r.amount;
         if (isUserAPayer(r.payer)) {
           stats[m].liaoExp += r.amount;
